@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html><head><title>xvc.cc</title></head>
+<style>
+
+html, body {
+	padding: 0px;
+	margin: 0px;
+	height: 100%;
+}
+
+body {
+	background-color: #F2F2F2;
+	font: 14px "Calibri", "Trebuchet MS", sans-serif;
+}
+
+#floater {
+	float: left;
+	height: 50%;
+	margin-bottom:-15px;
+}
+
+#form {
+	clear: left;
+	margin: 0 auto;
+	width: 340px;
+}
+
+#gap {
+	height: 60px;
+}
+
+#message {
+	text-align: center;
+	/* font-weight: bold; */
+}
+
+#password {
+	display: block;
+	float: left;
+	width: 300px;
+	height: 30px;
+	margin: 0px;
+	padding: 0px;
+	border: 1px solid #DDD;
+	box-sizing: content-box;
+}
+
+#go {
+	display: block;
+	float: right;
+	width: 30px;
+	height: 30px;
+	margin: 0px;
+	padding: 0px;
+	border: 1px solid #DDD;
+	background-color: #F2F2F2;
+	box-sizing: content-box;
+}
+
+</style>
+<body>
+
+<div id="floater"></div>
+
+<div id="form">
+<form action="${post_url}" method="post">
+<input type="password" id="password" name="password" required autofocus>
+<script>
+if (!("autofocus" in document.createElement("input"))) {
+  document.getElementById("password").focus();
+}
+</script>
+<input type="submit" id="go" value="Go">
+</form>
+</div>
+
+<div id="gap"></div>
+<div id="message">${message}</div>
+
+</body>
+</html>

@@ -28,10 +28,10 @@ class AuthResource(Resource):
     isLeaf = True
     
     def render_GET(self, request):
-        vars = {
+        page_vars = {
             'message': '',
             'post_url': request.uri
         }
         
         with open('login.html') as f:
-            return Template(f.read()).substitute(vars)
+            return Template(f.read()).substitute(page_vars)

@@ -42,10 +42,12 @@ class EndpointPairTransport(object):
             self.write(s)
     
     def loseConnection(self):
+        #import traceback
+        #traceback.print_stack()
         self.destProtocol.connectionLost(Failure(ConnectionDone))
     
     def getPeer(self):
-        return None
+        None
     
     def getHost(self):
-        return None
+        None

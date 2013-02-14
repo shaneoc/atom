@@ -3,12 +3,8 @@
 import os
 #import sys
 
-#from twisted.python import log
-
 #from atom.router import Router
 from atom.router2.proxy import ProxyServer
-
-#log.startLogging(sys.stdout)
 
 #Router(ip          = '127.0.0.1',
 #       port        = 8080,

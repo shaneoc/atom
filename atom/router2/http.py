@@ -1,8 +1,9 @@
-import logging
 from gevent.event import Event
 from gevent import Timeout
 
-log = logging.getLogger(__name__)
+from atom.router2.logger import getLogger
+
+log = getLogger(__name__)
 
 
 MAX_LINE_LENGTH = 8192
@@ -32,36 +33,32 @@ def http_socket_pair():
 class FakeSocketPair(object):
     def __new__(cls):
         a, b = object.__new__(cls), object.__new__(cls)
-        a._data_ready = Event()
-        b._data_ready = Event()
         a._other = b
         b._other = a
+        a._data = ''
+        b._data = ''
+        a._data_ready = Event()
+        b._data_ready = Event()
+        a._closed = False
+        b._closed = False
         return a, b
     
-    #@classmethod
-    #def create(cls):
-    #    a, b = cls(), cls()
-    #    a._other = b
-    #    b._other = a
-    #    return a, b
-    #
-    #def __init__(self):
-    #    self._other = None
-    #    self._data = None
-    #    self._data_ready = Event
-        
-    def recv(self, size):
-        self._data_ready.wait()
-        self._data_ready.clear()
-        return self._data
+    def recv(self, _):
+        if not self._closed:
+            self._data_ready.wait()
+            self._data_ready.clear()
+        data, self._data = self._data, ''
+        return data
     
     def sendall(self, data):
-        self._other._data = data
-        self._other._data_ready.set()
+        if not self._closed and len(data) > 0:
+            self._other._data += data
+            self._other._data_ready.set()
     
     def close(self):
-        pass
-        #raise NotImplementedError()
+        self._closed = True
+        self._other._closed = True
+        self._other._data_ready.set()
 
 
 class HTTPSocket(object):
@@ -77,7 +74,10 @@ class HTTPSocket(object):
                 if len(self._buf) > MAX_LINE_LENGTH:
                     raise HTTPSyntaxError('Line too long')
                 with Timeout(RECV_TIMEOUT, HTTPTimeoutError()):
-                    self._buf += self._sock.recv(RECV_BUFFER_SIZE)
+                    data = self._sock.recv(RECV_BUFFER_SIZE)
+                if len(data) == 0:
+                    raise HTTPConnectionClosed()
+                self._buf += data
             else:
                 return line
     
@@ -90,7 +90,18 @@ class HTTPSocket(object):
                 if size == 0:
                     return
             with Timeout(RECV_TIMEOUT, HTTPTimeoutError()):
-                self._buf += self._sock.recv(RECV_BUFFER_SIZE)
+                data = self._sock.recv(RECV_BUFFER_SIZE)
+            if len(data) == 0:
+                raise HTTPConnectionClosed()
+            self._buf += data
+    
+    def _read_all(self):
+        yield self._buf
+        while True:
+            data = self._sock.recv(RECV_BUFFER_SIZE)
+            if len(data) == 0:
+                raise HTTPConnectionClosed()
+            yield data
     
     def read_headers(self, type_, auto_continue=True):
         line = self._read_line()
@@ -114,12 +125,26 @@ class HTTPSocket(object):
                 headers.get_single('Expect') == '100-continue':
             self._expect_continue = True
         
+        self._has_body = True
+        if type_ == 'request':
+            if not headers.get_chunked() and not headers.get_content_length():
+                self._has_body = False
+        else:
+            if self._sent_method.upper() == 'HEAD':
+                self._has_body = False
+            if headers.code >= 100 and headers.code < 200:
+                self._has_body = False
+            if headers.code == 204 or headers.code == 304:
+                self._has_body = False
+        
         self._chunked = headers.get_chunked()
         self._content_length = headers.get_content_length()
         return headers
     
     def send_headers(self, headers):
         headers.send(self._sock)
+        if headers.type == 'request':
+            self._sent_method = headers.method
     
     def read_body(self):
         raise NotImplementedError()
@@ -130,34 +155,43 @@ class HTTPSocket(object):
             self.send_headers(HTTPHeaders.response(100))
             self._expect_continue = False
         
+        if not self._has_body:
+            yield ''
+            return
+        
         if self._chunked:
-            while True:
-                line = self._read_line()
-                try:
-                    chunk_size = int(line.split(';',1)[0],base=16)
-                except ValueError:
-                    raise HTTPSyntaxError('Invalid chunk size')
-                yield line + '\r\n'
-                
-                if chunk_size > 0:
-                    for data in self._read_bytes(chunk_size):
-                        yield data
-                    line = self._read_line()
-                    if line != '':
-                        raise HTTPSyntaxError('Chunk does not match chunk size')
-                    yield '\r\n'
-                else:
-                    while True:
-                        line = self._read_line()
-                        yield line + '\r\n'
-                        if line == '':
-                            break
-                    break
+            for piece in self._read_chunked_body():
+                yield piece
         elif self._content_length:
             for data in self._read_bytes(self._content_length):
                 yield data
         else:
-            yield ''
+            for data in self._read_all():
+                yield data
+    
+    def _read_chunked_body(self):
+        while True:
+            line = self._read_line()
+            try:
+                chunk_size = int(line.split(';',1)[0],base=16)
+            except ValueError:
+                raise HTTPSyntaxError('Invalid chunk size')
+            yield line + '\r\n'
+            
+            if chunk_size > 0:
+                for data in self._read_bytes(chunk_size):
+                    yield data
+                line = self._read_line()
+                if line != '':
+                    raise HTTPSyntaxError('Chunk does not match chunk size')
+                yield '\r\n'
+            else:
+                while True:
+                    line = self._read_line()
+                    yield line + '\r\n'
+                    if line == '':
+                        break
+                break
     
     def send_body(self, data):
         raise NotImplementedError()
@@ -178,6 +212,8 @@ class HTTPHeaders(object):
         assert type_ in ('request', 'response')
         self.type = type_
         self._headers = []
+        self._chunked = None
+        self._content_length = None
     
     @classmethod
     def parse(cls, type_, lines):
@@ -210,7 +246,8 @@ class HTTPHeaders(object):
                 if cur_header != None:
                     self._add_raw(cur_header)
                 cur_header = line
-        self._add_raw(cur_header)
+        if cur_header != None:
+            self._add_raw(cur_header)
         
         self.check_syntax()
         return self
@@ -319,6 +356,9 @@ class HTTPHeaders(object):
         return self.uri.split('?',1)[0]
 
 class HTTPTimeoutError(Exception):
+    pass
+
+class HTTPConnectionClosed(Exception):
     pass
 
 class HTTPSyntaxError(Exception):

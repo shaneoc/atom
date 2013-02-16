@@ -4,7 +4,7 @@ import os
 #import sys
 
 #from atom.router import Router
-from atom.router2.proxy import ProxyServer
+from atom.router.proxy import ProxyServer
 
 #Router(ip          = '127.0.0.1',
 #       port        = 8080,

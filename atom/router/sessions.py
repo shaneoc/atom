@@ -5,20 +5,18 @@ import time
 import hashlib
 import random
 
-from twisted.web import http
-from twisted.python import log
-from twisted.internet import defer
+from gevent import spawn
 
-from atom.router.endpointpair import EndpointPair
+from atom.http import HTTPHeaders, http_socket_pair
+from atom.logger import getLogger
+
+log = getLogger(__name__)
 
 class SessionManager(object):
     def __init__(self, router):
         self.router = router
-        self._endpoint = EndpointPair()
-        self._endpoint.listen(_SessionManagerHttpFactory(router))
-    
-    def start(self):
-        return self.router.database.runOperation(
+        
+        self.router.database.execute(
             'CREATE TABLE IF NOT EXISTS sessions (' +
             'id        INTEGER PRIMARY KEY,' +
             'user_id   INTEGER NOT NULL,' +
@@ -35,7 +33,7 @@ class SessionManager(object):
     
     def validate_session(self, hostname, session_cookies, remote_ip):
         if len(session_cookies) == 0:
-            return defer.succeed(False)
+            return False
         
         uid_key_pairs = []
         for cookie in session_cookies:
@@ -44,20 +42,17 @@ class SessionManager(object):
                 continue
             uid_key_pairs.append(tuple(parts))
         
-        return self.router.database.runInteraction(self._validate_db,
-            hostname, uid_key_pairs, remote_ip)
-        
-    def _validate_db(self, txn, hostname, uid_key_pairs, remote_ip):
         now = int(time.time())
         cutoff = now - 60*60*24;
-        txn.execute('DELETE FROM sessions WHERE last_seen < ?', (cutoff,))
+        db = self.router.database
+        db.execute('DELETE FROM sessions WHERE last_seen < ?', (cutoff,))
         
         for uid, key in uid_key_pairs:
-            txn.execute('SELECT user_id, hostname, remote_ip FROM sessions WHERE key = ?', (key,))
-            row = txn.fetchone()
+            db.execute('SELECT user_id, hostname, remote_ip FROM sessions WHERE key = ?', (key,))
+            row = db.fetchone()
             if row[0] != uid or row[1] != hostname or row[2] != remote_ip:
                 continue
-            txn.execute('UPDATE sessions SET last_seen = ? WHERE key = ?', (now, key))
+            db.execute('UPDATE sessions SET last_seen = ? WHERE key = ?', (now, key))
             return uid
         
         return False
@@ -70,111 +65,98 @@ class SessionManager(object):
         key = self._generate_nonce()
         now = int(time.time())
         
-        d = self.router.database.runOperation(
+        self.router.database.execute(
             'INSERT INTO sessions VALUES (NULL, ?, ?, ?, ?, ?, ?, ?)',
             (uid, hostname, key, remote_ip, now, now))
         
-        def ret_val(v): return v
-        return d.addCallback(ret_val, key)
+        return key
     
     def get_sessions(self):
         pass
     
-    def get_endpoint(self):
-        return self._endpoint
+    def get_socket(self):
+        a, b = http_socket_pair()
+        spawn(SessionManagerHTTPConnection, b)
+        return a
 
-class _SessionManagerHttpRequest(http.Request):
-    def __init__(self, channel, queued):
-        http.Request.__init__(self, channel, queued)
-        self.router = self.channel.factory.router
-        self.notifyFinish().addErrback(log.err)
-    
-    #def _finish_error(self, reason):
-    #    log.err(reason)
-    
-    def process(self):
-        if self.path != '/+atom/login':
-            self.setResponseCode(500)
-            
-            log.msg('process 0 finished')
-            self.finish()
-            log.err("SessionManager: received a path that wasn't /+atom/login")
+
+class SessionManagerHTTPConnection(object):
+    def __init__(self, sock):
+        self.sock = sock
+        self.headers = sock.read_headers('request')
+        
+        if self.headers.path != '/+atom/login':
+            sock.send_headers(HTTPHeaders.response(500))
+            sock.close()
+            log.error("SessionManager: received a path that wasn't /+atom/login")
             return
         
-        system_host = (self.getHeader('Host') == self.router.directory.get_system_hostname())
+        system_host = (sock.get_single('Host') == self.router.directory.get_system_hostname())
         if system_host:
-            if self.method == 'GET':
+            if self.headers.method == 'GET':
                 self._show_login('')
-            elif self.method == 'POST':
+            elif self.headers.method == 'POST':
                 self.process_sys_post()
             else:
-                self.setHeader('Allow', 'GET, HEAD, POST')
-                self.setResponseCode(405)
+                response = HTTPHeaders.response(405)
+                response.set('Allow', 'GET, HEAD, POST')
+                sock.send_headers(response)
         else:
-            print('{}: {}'.format(self.method, self.path))
-            self.setHeader('Content-Type', 'text/plain')
-            self.write('path: ' + self.path)
+            print('{}: {}'.format(self.headers.method, self.headers.path))
+            response = HTTPHeaders.response(200)
+            response.set('Content-Type', 'text/plain')
+            sock.send_headers(response)
+            
+            sock.send_raw_body('path: ' + self.path)
             #if self.method == 'PUT':
             #  with open(self.path[1:], 'wb') as f:
             #    f.write(self.content.read())
             #self.write('test!')
             log.msg('process 1 finished')
-            self.finish()
-    
-    def _errback(self, failure):
-        log.msg('errback finished')
-        log.err(failure)
-        if not self.finished:
-            self.setResponseCode(500)
-            self.finish()
+            sock.close()
     
     def _show_login(self, message):
-        if 'return' in self.args and re.match(r'^[a-zA-Z0-9=_-]+$', self.args['return'][0]):
-            post_url = '/+atom/login?return={}'.format(self.args['return'][0])
+        args = self.headers.args
+        if 'return' in args and re.match(r'^[a-zA-Z0-9=_-]+$', args['return'][0]):
+            post_url = '/+atom/login?return={}'.format(args['return'][0])
         else:
             post_url = '/+atom/login'
         
+        response = HTTPHeaders.response(200)
+        response.set('Content-Type', 'text/html')
+        self.sock.send_headers(response)
+        
         with open('login.html') as f:
-            self.write(Template(f.read()).substitute({
+            self.sock.send_raw_body(Template(f.read()).substitute({
                 'message': message,
                 'post_url': post_url
             }))
             log.msg('_show_login finished')
-            self.finish()
+            self.sock.close()
     
     def process_sys_post(self):
-        def done(uid):
-            if uid == False:
-                self._show_login('Invalid username or password')
-            else:
-                def add_cookie(key, uid):
-                    self.cookies.append(
-                        'atom-session={}-{}; Expires=Mon, 31 Dec 2035 23:59:59 GMT; Path=/; {}HttpOnly'.format(
-                        uid, key, 'Secure; ' if self.router.secure else ''))
-                remote_ip = self.getHeader('X-Forwarded-For')
-                (self.router.sessions.create_session(uid, self.host, remote_ip)
-                    .addCallback(add_cookie, uid)
-                    .addErrback(self._errback))
+        uid = self._check_login()
         
-        (self._check_login()
-            .addCallback(done)
-            .addErrback(self._errback))
+        if uid == False:
+            self._show_login('Invalid username or password')
+        else:
+            remote_ip = self.headers.get_single('X-Forwarded-For')
+            host = self.headers.get_single('Host')
+            key = self.router.sessions.create_session(uid, host, remote_ip)
+            
+            args = self.headers.args
+            response = HTTPHeaders.response(302)
+            response.set('Location', args['return'][0])
+            response.add('Set-Cookie',
+                'atom-session={}-{}; Expires=Mon, 31 Dec 2035 23:59:59 GMT; Path=/; {}HttpOnly'.format(
+                uid, key, 'Secure; ' if self.router.secure else ''))
+        
     
     def _check_login(self):
+        args = self.sock.read_form_body()
         if 'username' not in self.args or 'password' not in self.args:
-            return defer.succeed(False)
+            return False
         
-        username = self.args['username'][0]
-        password = self.args['password'][0]
+        username = args['username'][0]
+        password = args['password'][0]
         return self.router.directory.check_login(username, password)
-    
-
-class _SessionManagerHttpConnection(http.HTTPChannel):
-    requestFactory = _SessionManagerHttpRequest
-
-class _SessionManagerHttpFactory(http.HTTPFactory):
-    protocol = _SessionManagerHttpConnection
-    
-    def __init__(self, router):
-        http.HTTPFactory.__init__(self)
-        self.router = router

@@ -1,134 +1,81 @@
-from twisted.internet import reactor
-from twisted.internet.endpoints import UNIXClientEndpoint, TCP4ServerEndpoint
-from twisted.internet.protocol import Protocol, Factory, ServerFactory
-from twisted.protocols.basic import LineReceiver
-from twisted.protocols.policies import TimeoutMixin
-from twisted.python import log
+from gevent.server import StreamServer
+from gevent import spawn
 
-from atom.router.http import HTTPProtocol
+from atom.http import HTTPSocket, HTTPHeaders, http_socket_pair
+from atom.logger import getLogger
 
+log = getLogger(__name__)
 
-class ClientFactory(Factory):
-    def __init__(self, server):
-        self.server = server
-    
-    def buildProtocol(self, addr):
-        return ClientConnection(self.server)
-
-class ClientConnection(HTTPProtocol):
-    def __init__(self, server):
-        HTTPProtocol.__init__(self, client = True)
-        self.server = server
-        self.finished = False
-    
-    def allHeadersReceived(self):
-        self.headers.extract_session_cookies()
-        self.headers.replay(self.server)
-    
-    def bodyDataReceived(self, data):
-        self.server.write(data)
-    
-    def bodyDataFinished(self):
-        self.finished = True
-        self.disconnect()
-        self.server.resumeProducing()
-    
-    def connectionLost(self, reason):
-        HTTPProtocol.connectionLost(self, reason)
-        if not self.finished:
-            self.server.disconnect()
-
-
-class ProxyFactory(ServerFactory):
-    def __init__(self, router):
+class ProxyServer(object):
+    def __init__(self, router, ip, port):
         self.router = router
+        self.server = StreamServer((ip, port), self.handle2)
     
-    def buildProtocol(self, addr):
-        return ServerConnection(self.router)
-
-
-class ServerConnection(HTTPProtocol):
-    def __init__(self, router):
-        HTTPProtocol.__init__(self, client = False)
-        self.router = router
-        self.client = None
-
-    def connectionLost(self, reason):
-        HTTPProtocol.connectionLost(self, reason)
-        if self.client:
-            self.client.disconnect()
+    def start(self):
+        self.server.serve_forever()
     
-    def allHeadersReceived(self):
-        self.pauseProducing()
+    def handle(self, sock, address):
+        sock = HTTPSocket(sock)
         
-        # Check authentication
-        # TODO encrypt the URL and base64 before redirecting to /+atom/login
-        #       - encrypting prevents others from putting arbitrary URLs there
-        #      prevent URLs after /+atom from working in order to preserve that for me
+        while True:
+            headers = sock.read_headers('request')
+            
+            # Remove port from hostname if necessary
+            #if ':' in headers.host:
+            #    parts = headers.host.split(':',1)
+            #    if self.router.secure and parts[1] == '443':
+            #        headers.set('Host', parts[0])
+            #    if not self.router.secure and parts[1] == '80':
+            #        headers.set('Host', parts[0])
+            
+            # Add remote IP
+            remote_ip = address[0]
+            headers.set('X-Forwarded-For', remote_ip)
+            
+            # Remove reserved headers
+            headers.remove('X-Authenticated-User')
+            
+            for _ in sock.read_raw_body():
+                pass
+            
+            headers = HTTPHeaders.response(200)
+            headers.set('Content-Type', 'text/plain')
+            sock.send_headers(headers)
+            
+            sock.send_raw_body('test!!!!\r\n')
+            sock.close()
+    
+    def handle2(self, sock, address):
+        sock = HTTPSocket(sock)
+        log.info('Received connection from {!r}', address)
         
-        # Remove port from hostname if necessary
-        if ':' in self.headers.host:
-            parts = self.headers.host.split(':',1)
-            if self.router.secure and parts[1] == '443':
-                self.headers.set('Host', parts[0])
-            if not self.router.secure and parts[1] == '80':
-                self.headers.set('Host', parts[0])
+        while True:
+            a, b = http_socket_pair()
+            spawn(self.client, b, None)
+            
+            
+            headers = sock.read_headers('request')
+            log.info('Received "{}" request for URI "{}"', headers.method, headers.uri)
+            a.send_headers(headers)
+            a.send_raw_body(sock.read_raw_body())
+            
+            sock.send_headers(a.read_headers('response'))
+            sock.send_raw_body(a.read_raw_body())
+            
+            a.close()
+            #sock.close()
         
-        # Add remote IP
-        remote_ip = self.transport.getPeer().host
-        self.headers.set('X-Forwarded-For', remote_ip)
+    
+    def client(self, sock, address):
+        headers = sock.read_headers('request')
+        log.info('Client received "{}" request for URI "{}"', headers.method, headers.uri)
         
-        # Remove reserved headers
-        self.headers.remove('X-Authenticated-User')
+        for _ in sock.read_raw_body():
+            pass
         
-        # Validate session
-        session_cookies = self.headers.extract_session_cookies()
-        (self.router.sessions.validate_session(self.headers.host, session_cookies, remote_ip)
-            .addCallback(self._session_validated)
-            .addErrback(self.errback))
-    
-    def _session_validated(self, uid):
-        if uid != False:
-            self.headers.set('X-Authenticated-User', str(uid))
+        headers = HTTPHeaders.response(200)
+        headers.set('Content-Type', 'text/plain')
+        sock.send_headers(headers)
         
-        if self.headers.uri.startswith('/+atom/login'):
-            self._endpoint_ready(self.router.sessions.get_endpoint())
-        else:
-            if uid == False:
-                scheme = 'https://' if self.router.secure else 'http://'
-                return_url = scheme + self.headers.host + self.headers.uri
-                redirect_url = self.router.sessions.get_login_url(return_url)
-                self.redirect(redirect_url)
-                self.transport.loseConnection()
-            else:
-                if self.headers.uri.startswith('/+atom'):
-                    self.notfound()
-                    self.transport.close()
-                else:
-                    (self.directory.check_authorization(uid, self.headers.host)
-                        .addCallback(self._authorization_checked)
-                        .addErrback(self.errback))
-    
-    def _authorization_checked(self, authorized):
-        if authorized:
-            (self.directory.get_endpoint(self.headers.host, self.headers.uri)
-                .addCallback(self._endpoint_ready)
-                .addErrback(self.errback))
-        else:
-            raise NotImplementedError()
-    
-    def _endpoint_ready(self, endpoint):
-        (endpoint.connect(ClientFactory(self))
-            .addCallback(self._client_connected)
-            .addErrback(self.errback))
-    
-    def _client_connected(self, client):
-        self.client = client
-        self.headers.replay(self.client)
-        self.resumeProducing()
-    
-    def bodyDataReceived(self, data):
-        self.client.write(data)
-    
-    def bodyDataFinished(self):
-        self.pauseProducing()
+        sock.send_raw_body('test!!!!\r\n')
+        sock.close()

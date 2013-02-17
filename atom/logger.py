@@ -1,3 +1,5 @@
+import sys
+
 import gevent
 
 _format = '{greenlet:016X} - {name}({level}): {msg}'
@@ -15,6 +17,14 @@ class Logger(object):
     def error(self, msg_, *args, **kwargs):
         self.log('ERROR', msg_, *args, **kwargs)
     
+    def exception(self, msg_ = None, *args, **kwargs):
+        if msg_:
+            msg = msg_.format(*args, **kwargs) + '\n\n'
+        else:
+            msg = ''
+        
+        self.log('ERROR', '{}{}'.format(msg, sys.exc_info()[2].format_exc()))
+    
     def info(self, msg_, *args, **kwargs):
         self.log('INFO', msg_, *args, **kwargs)
     
@@ -23,6 +33,9 @@ class Logger(object):
     
     def log(self, level_, msg_, *args, **kwargs):
         msg = msg_.format(*args, **kwargs)
+        
+        if '\n' in msg:
+            msg = '\n' + msg + '\n\n'
         
         print _format.format(
             greenlet=id(gevent.getcurrent()),

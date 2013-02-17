@@ -26,7 +26,7 @@ class HTTPHeaders(object):
     def parse(cls, type_, lines):
         self = cls(type_)
         
-        first_line = lines[0].split(None, 3)
+        first_line = lines[0].split(None, 2)
         if len(first_line) < 3:
             raise HTTPSyntaxError('Invalid first line: "{}"'.format(lines[0]))
         

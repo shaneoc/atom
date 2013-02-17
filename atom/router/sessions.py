@@ -76,12 +76,13 @@ class SessionManager(object):
     
     def get_socket(self):
         a, b = http_socket_pair()
-        spawn(SessionManagerHTTPConnection, b)
+        spawn(SessionManagerHTTPConnection, self.router, b)
         return a
 
 
 class SessionManagerHTTPConnection(object):
-    def __init__(self, sock):
+    def __init__(self, router, sock):
+        self.router = router
         self.sock = sock
         self.headers = sock.read_headers('request')
         
@@ -91,7 +92,7 @@ class SessionManagerHTTPConnection(object):
             log.error("SessionManager: received a path that wasn't /+atom/login")
             return
         
-        system_host = (sock.get_single('Host') == self.router.directory.get_system_hostname())
+        system_host = (self.headers.get_single('Host') == self.router.directory.get_system_hostname())
         if system_host:
             if self.headers.method == 'GET':
                 self._show_login('')
@@ -127,11 +128,10 @@ class SessionManagerHTTPConnection(object):
         self.sock.send_headers(response)
         
         with open('login.html') as f:
-            self.sock.send_raw_body(Template(f.read()).substitute({
+            self.sock.send_body(Template(f.read()).substitute({
                 'message': message,
                 'post_url': post_url
             }))
-            log.msg('_show_login finished')
             self.sock.close()
     
     def process_sys_post(self):

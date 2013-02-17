@@ -1,9 +1,12 @@
 
-class HTTPTimeoutError(Exception):
+class HTTPError(Exception):
     pass
 
-class HTTPConnectionClosed(Exception):
+class HTTPTimeoutError(HTTPError):
     pass
 
-class HTTPSyntaxError(Exception):
+class HTTPConnectionClosedError(HTTPError):
+    pass
+
+class HTTPSyntaxError(HTTPError):
     pass

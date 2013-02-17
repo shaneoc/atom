@@ -2,7 +2,7 @@ from urlparse import parse_qs
 
 from gevent import Timeout
 
-from atom.http.exceptions import HTTPConnectionClosed, HTTPSyntaxError, HTTPTimeoutError
+from atom.http.exceptions import HTTPConnectionClosedError, HTTPSyntaxError, HTTPTimeoutError
 from atom.http.headers import HTTPHeaders
 
 MAX_LINE_LENGTH = 8192
@@ -26,7 +26,7 @@ class HTTPSocket(object):
                 with Timeout(RECV_TIMEOUT, HTTPTimeoutError()):
                     data = self._sock.recv(RECV_BUFFER_SIZE)
                 if len(data) == 0:
-                    raise HTTPConnectionClosed()
+                    raise HTTPConnectionClosedError()
                 self._buf += data
             else:
                 return line
@@ -42,7 +42,7 @@ class HTTPSocket(object):
             with Timeout(RECV_TIMEOUT, HTTPTimeoutError()):
                 data = self._sock.recv(RECV_BUFFER_SIZE)
             if len(data) == 0:
-                raise HTTPConnectionClosed()
+                raise HTTPConnectionClosedError()
             self._buf += data
     
     def _read_all(self):
@@ -50,10 +50,10 @@ class HTTPSocket(object):
         while True:
             data = self._sock.recv(RECV_BUFFER_SIZE)
             if len(data) == 0:
-                raise HTTPConnectionClosed()
+                return
             yield data
     
-    def read_headers(self, type_, auto_continue=True):
+    def read_headers(self, type_):
         line = self._read_line()
         if type_ == 'request':
             while line == '':
@@ -70,10 +70,10 @@ class HTTPSocket(object):
         
         headers = HTTPHeaders.parse(type_, lines)
         
-        self._expect_continue = False
-        if type_ == 'request' and auto_continue and \
-                headers.get_single('Expect') == '100-continue':
-            self._expect_continue = True
+        #self._expect_continue = False
+        #if type_ == 'request' and auto_continue and \
+        #        headers.get_single('Expect') == '100-continue':
+        #    self._expect_continue = True
         
         self._has_body = True
         if type_ == 'request':
@@ -94,26 +94,26 @@ class HTTPSocket(object):
     
     def send_headers(self, headers):
         headers.send(self._sock)
+        
+        self._sent_chunked = headers.get_chunked()
+        
         if headers.type == 'request':
             self._sent_method = headers.method
     
-    def read_body(self):
-        raise NotImplementedError()
-    
-    def read_raw_body(self):
-        if self._expect_continue:
-            # TODO what if they call send_headers first?
-            self.send_headers(HTTPHeaders.response(100))
-            self._expect_continue = False
+    def read_body(self, raw=False):
+        #if self._expect_continue:
+        #    # TODO what if they call send_headers first?
+        #    self.send_headers(HTTPHeaders.response(100))
+        #    self._expect_continue = False
         
         if not self._has_body:
             yield ''
             return
         
         if self._chunked:
-            for piece in self._read_chunked_body():
+            for piece in self._read_chunked_body(raw):
                 yield piece
-        elif self._content_length:
+        elif self._content_length != None:
             for data in self._read_bytes(self._content_length):
                 yield data
         else:
@@ -122,18 +122,19 @@ class HTTPSocket(object):
     
     def read_form_body(self):
         if self._content_type == 'application/x-www-form-urlencoded':
-            return parse_qs(''.join(self.read_raw_body()))
+            return parse_qs(''.join(self.read_body()))
         else:
             raise NotImplementedError()
     
-    def _read_chunked_body(self):
+    def _read_chunked_body(self, raw):
         while True:
             line = self._read_line()
             try:
                 chunk_size = int(line.split(';',1)[0],base=16)
             except ValueError:
                 raise HTTPSyntaxError('Invalid chunk size')
-            yield line + '\r\n'
+            if raw:
+                yield line + '\r\n'
             
             if chunk_size > 0:
                 for data in self._read_bytes(chunk_size):
@@ -141,19 +142,21 @@ class HTTPSocket(object):
                 line = self._read_line()
                 if line != '':
                     raise HTTPSyntaxError('Chunk does not match chunk size')
-                yield '\r\n'
+                if raw:
+                    yield '\r\n'
             else:
                 while True:
                     line = self._read_line()
-                    yield line + '\r\n'
+                    if raw:
+                        yield line + '\r\n'
                     if line == '':
                         break
                 break
     
-    def send_body(self, data):
-        raise NotImplementedError()
-    
-    def send_raw_body(self, data):
+    def send_body(self, data, raw=False):
+        if not raw and self._sent_chunked:
+            raise NotImplementedError()
+        
         if isinstance(data, str):
             self._sock.sendall(data)
         else:

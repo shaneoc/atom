@@ -5,8 +5,28 @@ from atom.http.socket import HTTPSocket
 FAKESOCKET_BUFFER_SIZE = 8192
 
 def http_socket_pair():
-    a, b = FakeSocketPair()
-    return HTTPSocket(a), HTTPSocket(b)
+    client, server = FakeSocketPair()
+    return HTTPSocket(client, 'client'), HTTPSocket(server, 'server')
+
+
+class LoggingSocket(object):
+    def __init__(self, sock, file_obj):
+        self._sock = sock
+        self._file = file_obj
+    
+    def recv(self, size):
+        data = self._sock.recv(size)
+        self._file.write('recv:\n|{}|\n'.format(data))
+        self._file.flush()
+        return data
+    
+    def sendall(self, data):
+        self._file.write('send:\n|{}|\n'.format(data))
+        self._file.flush()
+        return self._sock.sendall(data)
+    
+    def close(self):
+        self._sock.close()
 
 
 class FakeSocketPair(object):

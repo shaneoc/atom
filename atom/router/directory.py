@@ -29,14 +29,20 @@ class Directory(object):
     def get_system_hostname(self):
         return 'sys.xvc.cc:8080'
     
+    def get_shell_hostname(self, uid):
+        return 'home.xvc.cc:8080'
+    
     def check_login(self, username, password):
-        return username == 'shane' and password == 'test'
+        if username == 'shane' and password == 'test':
+            return 1
+        else:
+            return None
     
-    def check_authentication(self, src_user, src_hostname, dest_hostname):
-        pass
+    def check_authorization(self, uid, hostname):
+        return True
     
-    def get_module(self, hostname):
-        pass
+    def get_socket(self, hostname, uri):
+        return False
 
 class Module(object):
     def get_endpoint(self, path):

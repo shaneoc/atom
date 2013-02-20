@@ -1,11 +1,11 @@
-import sys
+import traceback
 
 import gevent
 
 _format = '{greenlet:016X} - {name}({level}): {msg}'
 _loggers = {}
 
-def getLogger(name):
+def get_logger(name):
     if not name in _loggers:
         _loggers[name] = Logger(name)
     return _loggers[name]
@@ -23,7 +23,7 @@ class Logger(object):
         else:
             msg = ''
         
-        self.log('ERROR', '{}{}'.format(msg, sys.exc_info()[2].format_exc()))
+        self.log('ERROR', '{}{}'.format(msg, traceback.format_exc()))
     
     def info(self, msg_, *args, **kwargs):
         self.log('INFO', msg_, *args, **kwargs)
